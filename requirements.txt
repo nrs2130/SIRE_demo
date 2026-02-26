@@ -1,0 +1,13 @@
+# Core
+azure-ai-voicelive>=1.0.0b1
+azure-core>=1.30.0
+azure-identity>=1.17.0
+
+# Audio
+pyaudio>=0.2.14
+
+# HTTP client for AI Search REST calls
+httpx>=0.27.0
+
+# Environment
+python-dotenv>=1.0.0
