@@ -53,10 +53,38 @@ from azure.ai.voicelive.models import (
 from config import AppConfig
 from search_client import SIRESearchClient
 
+# MCP server tool functions (same search logic, but through MCP wrapper)
+from mcp_server.server import (
+    search_group as mcp_search_group,
+    search_user as mcp_search_user,
+)
+
 # Re-use tool definitions and system prompt from main module
 from main import TOOLS, SYSTEM_INSTRUCTIONS
 
 logger = logging.getLogger("sire.streamlit")
+
+
+# ---------------------------------------------------------------------------
+# MCP Search Adapter — same interface as SIRESearchClient but via MCP tools
+# ---------------------------------------------------------------------------
+
+class MCPSearchAdapter:
+    """Wraps MCP server tool functions to match the SIRESearchClient interface.
+
+    This lets us swap the search backend in the agent loop without changing
+    any call-site code.  The MCP path serialises/deserialises through JSON
+    (exactly as a real MCP client would), so any serialisation issues surface
+    here too.
+    """
+
+    async def search_group(self, query: str, top: int = 5) -> list[dict[str, Any]]:
+        raw = await mcp_search_group(query, top=top)
+        return json.loads(raw)
+
+    async def search_user(self, query: str, top: int = 5) -> list[dict[str, Any]]:
+        raw = await mcp_search_user(query, top=top)
+        return json.loads(raw)
 
 # ---------------------------------------------------------------------------
 # Shared state between the agent thread and Streamlit UI
@@ -221,7 +249,7 @@ class StreamlitAudioProcessor:
 # Agent runner (runs in a background thread)
 # ---------------------------------------------------------------------------
 
-async def _run_agent(state: AgentState):
+async def _run_agent(state: AgentState, search_backend: str = "python"):
     """Async entry point for the voice agent, driven by AgentState."""
     cfg = AppConfig.from_env()
     cred: Union[AzureKeyCredential, AsyncTokenCredential]
@@ -233,7 +261,13 @@ async def _run_agent(state: AgentState):
         cred = AzureKeyCredential(cfg.voicelive.api_key)
         state.push("info", "Using API key credential")
 
-    search = SIRESearchClient(cfg.search)
+    # Select search backend
+    if search_backend == "mcp":
+        search = MCPSearchAdapter()
+        state.push("info", "Search backend: MCP Server")
+    else:
+        search = SIRESearchClient(cfg.search)
+        state.push("info", "Search backend: Custom Python")
     vc = cfg.voicelive
 
     state.push("status", f"Connecting to {vc.endpoint} ...")
@@ -410,10 +444,10 @@ async def _run_agent(state: AgentState):
         state.push("status", "Disconnected")
 
 
-def _agent_thread(state: AgentState):
+def _agent_thread(state: AgentState, search_backend: str = "python"):
     """Thread target — runs the async agent."""
     try:
-        asyncio.run(_run_agent(state))
+        asyncio.run(_run_agent(state, search_backend=search_backend))
     except Exception as e:
         state.push("error", f"Thread error: {e}")
     finally:
@@ -455,6 +489,29 @@ def render_ui():
     with st.sidebar:
         st.header("Session Control")
 
+        # Search backend selector
+        st.markdown("---")
+        st.subheader("Search Backend")
+        backend_choice = st.radio(
+            "Choose which search path to use:",
+            ["Custom Python", "MCP Server"],
+            index=0,
+            help=(
+                "**Custom Python** — calls SIRESearchClient directly.\n\n"
+                "**MCP Server** — calls through MCP tool wrappers "
+                "(same underlying logic, but serialised via JSON as an MCP client would)."
+            ),
+            disabled=state.connected,  # can't switch mid-session
+        )
+        search_backend = "mcp" if backend_choice == "MCP Server" else "python"
+        st.session_state["search_backend"] = search_backend
+
+        if search_backend == "mcp":
+            st.caption("🔌 MCP Server path active — results flow through MCP tool wrappers")
+        else:
+            st.caption("🐍 Custom Python path active — direct SIRESearchClient calls")
+        st.markdown("---")
+
         if state.connected:
             st.success(f"🟢 Connected")
             if state.session_id:
@@ -474,8 +531,8 @@ def render_ui():
             st.info("🔵 Disconnected")
             if st.button("▶️ START SESSION", type="primary", use_container_width=True):
                 state.clear()
-                state.push("status", "Starting agent...")
-                t = threading.Thread(target=_agent_thread, args=(state,), daemon=True)
+                state.push("status", f"Starting agent ({backend_choice} backend)...")
+                t = threading.Thread(target=_agent_thread, args=(state, search_backend), daemon=True)
                 t.start()
                 st.session_state["agent_thread"] = t
                 time.sleep(1)
@@ -561,33 +618,105 @@ def render_ui():
     st.subheader("🧪 Manual Search Test")
     st.caption("Test AI Search directly without voice — doesn't use the realtime model.")
 
-    test_col1, test_col2 = st.columns(2)
+    test_col1, test_col2, test_col3 = st.columns(3)
     with test_col1:
         search_type = st.selectbox("Search type", ["User", "Group"])
     with test_col2:
         search_query = st.text_input("Query", placeholder="e.g. Barbara, Cardiology...")
+    with test_col3:
+        manual_backend = st.selectbox(
+            "Backend",
+            ["Both (compare)", "Custom Python", "MCP Server"],
+            help="Run one backend or both side-by-side to compare results.",
+        )
 
     if st.button("Search", disabled=not search_query):
-        import asyncio
+        import asyncio as _aio
+        import time as _time
         cfg = AppConfig.from_env()
 
-        async def _run_search():
+        async def _run_python_search():
             client = SIRESearchClient(cfg.search)
             if search_type == "User":
                 return await client.search_user(search_query, top=10)
             else:
                 return await client.search_group(search_query, top=10)
 
-        try:
-            results = asyncio.run(_run_search())
-            st.success(f"Found {len(results)} result(s)")
+        async def _run_mcp_search():
+            adapter = MCPSearchAdapter()
+            if search_type == "User":
+                return await adapter.search_user(search_query, top=10)
+            else:
+                return await adapter.search_group(search_query, top=10)
+
+        run_python = manual_backend in ("Both (compare)", "Custom Python")
+        run_mcp = manual_backend in ("Both (compare)", "MCP Server")
+
+        python_results, mcp_results = None, None
+        python_ms, mcp_ms = 0.0, 0.0
+
+        if run_python:
+            try:
+                t0 = _time.perf_counter()
+                python_results = _aio.run(_run_python_search())
+                python_ms = (_time.perf_counter() - t0) * 1000
+            except Exception as e:
+                st.error(f"Python search failed: {e}")
+
+        if run_mcp:
+            try:
+                t0 = _time.perf_counter()
+                mcp_results = _aio.run(_run_mcp_search())
+                mcp_ms = (_time.perf_counter() - t0) * 1000
+            except Exception as e:
+                st.error(f"MCP search failed: {e}")
+
+        # ── Display results ──────────────────────────────────────────
+        if run_python and run_mcp:
+            # Side-by-side comparison
+            cmp_col1, cmp_col2 = st.columns(2)
+            with cmp_col1:
+                st.markdown(f"**🐍 Custom Python** — {len(python_results or [])} result(s) in {python_ms:.0f} ms")
+                if python_results:
+                    st.dataframe(python_results, use_container_width=True)
+            with cmp_col2:
+                st.markdown(f"**🔌 MCP Server** — {len(mcp_results or [])} result(s) in {mcp_ms:.0f} ms")
+                if mcp_results:
+                    st.dataframe(mcp_results, use_container_width=True)
+
+            # Quick comparison summary
+            if python_results and mcp_results:
+                py_ids = [r.get("id") or r.get("GroupID") for r in python_results]
+                mcp_ids = [r.get("id") or r.get("GroupID") for r in mcp_results]
+                if py_ids == mcp_ids:
+                    st.success("✅ Results match — same documents in same order")
+                    py_scores = [r.get("_match_score") for r in python_results]
+                    mcp_scores = [r.get("_match_score") for r in mcp_results]
+                    if py_scores == mcp_scores:
+                        st.success("✅ Scores identical")
+                    else:
+                        st.warning("⚠️ Same order but scores differ (possible floating-point variance)")
+                else:
+                    st.warning("⚠️ Results differ — different documents or ordering")
+
+                delta_ms = abs(python_ms - mcp_ms)
+                faster = "Python" if python_ms < mcp_ms else "MCP"
+                st.info(f"⏱️ {faster} was faster by {delta_ms:.0f} ms  (Python: {python_ms:.0f} ms, MCP: {mcp_ms:.0f} ms)")
+        else:
+            # Single backend
+            results = python_results if run_python else mcp_results
+            ms = python_ms if run_python else mcp_ms
+            label = "🐍 Custom Python" if run_python else "🔌 MCP Server"
+            st.success(f"{label} — {len(results or [])} result(s) in {ms:.0f} ms")
             if results:
                 st.dataframe(results, use_container_width=True)
-        except Exception as e:
-            st.error(f"Search failed: {e}")
 
-    # ── Auto-refresh while connected ────────────────────────────────────
-    if state.connected:
+    # ── Auto-refresh while session is active ────────────────────────────
+    # Refresh when connected OR when the agent thread is still running
+    # (covers the initial connection window before state.connected=True)
+    agent_thread = st.session_state.get("agent_thread")
+    thread_alive = agent_thread is not None and agent_thread.is_alive()
+    if state.connected or thread_alive:
         time.sleep(1.5)
         st.rerun()
 

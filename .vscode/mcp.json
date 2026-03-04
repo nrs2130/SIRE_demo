@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "sire-search": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "cwd": "${workspaceFolder}",
+      "env": {}
+    }
+  }
+}
