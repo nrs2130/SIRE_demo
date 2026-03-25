@@ -161,6 +161,16 @@ class StreamlitAudioProcessor:
         self.input_device_index: Optional[int] = int(_in) if _in else None
         self.output_device_index: Optional[int] = int(_out) if _out else None
 
+        # Log available output devices for diagnostics
+        try:
+            for i in range(self.audio.get_device_count()):
+                info = self.audio.get_device_info_by_index(i)
+                if int(info.get("maxOutputChannels", 0)) > 0:
+                    logger.info("  Output device %d: %s (maxOut=%d)",
+                                i, info.get("name", "?"), int(info["maxOutputChannels"]))
+        except Exception:
+            pass
+
         self.input_stream: Optional[pyaudio.Stream] = None
         self._pq: queue.Queue[StreamlitAudioProcessor._Packet] = queue.Queue()
         self._pb_base = 0
@@ -184,9 +194,27 @@ class StreamlitAudioProcessor:
             format=self.fmt, channels=self.channels, rate=self.rate,
             input=True, frames_per_buffer=self.chunk, stream_callback=_cb,
         )
+
+        # Build fallback attempts: explicit device first (if set), then system default
+        attempts: list[tuple[int, Optional[int]]] = []
         if self.input_device_index is not None:
-            kw["input_device_index"] = self.input_device_index
-        self.input_stream = self.audio.open(**kw)
+            attempts.append((1, self.input_device_index))
+        attempts.append((1, None))
+        attempts.append((2, None))
+
+        for ch, dev_idx in attempts:
+            try:
+                kw["channels"] = ch
+                kw.pop("input_device_index", None)
+                if dev_idx is not None:
+                    kw["input_device_index"] = dev_idx
+                self.input_stream = self.audio.open(**kw)
+                logger.info("Opened input stream: channels=%d, device_index=%s", ch, dev_idx)
+                return
+            except OSError as e:
+                logger.warning("Failed to open input (channels=%d, device=%s): %s", ch, dev_idx, e)
+
+        raise OSError("Could not open any audio input device. Check your sound settings.")
 
     def start_playback(self) -> None:
         if self.output_stream:
@@ -216,12 +244,34 @@ class StreamlitAudioProcessor:
             return (out, pyaudio.paComplete)
 
         kw: dict[str, Any] = dict(
-            format=self.fmt, channels=self.channels, rate=self.rate,
+            format=self.fmt, rate=self.rate,
             output=True, frames_per_buffer=self.chunk, stream_callback=_pb,
         )
+
+        # Build a list of (channels, device_index_or_None) combos to try
+        attempts: list[tuple[int, Optional[int]]] = []
         if self.output_device_index is not None:
-            kw["output_device_index"] = self.output_device_index
-        self.output_stream = self.audio.open(**kw)
+            # User explicitly set a device — try that first
+            attempts.append((1, self.output_device_index))
+            attempts.append((2, self.output_device_index))
+        # Always try system default (no device index) with mono then stereo
+        attempts.append((1, None))
+        attempts.append((2, None))
+
+        for ch, dev_idx in attempts:
+            try:
+                kw["channels"] = ch
+                kw.pop("output_device_index", None)
+                if dev_idx is not None:
+                    kw["output_device_index"] = dev_idx
+                self.output_stream = self.audio.open(**kw)
+                self.channels = ch  # remember what worked for playback
+                logger.info("Opened output stream: channels=%d, device_index=%s", ch, dev_idx)
+                return
+            except OSError as e:
+                logger.warning("Failed to open output (channels=%d, device=%s): %s", ch, dev_idx, e)
+
+        raise OSError("Could not open any audio output device. Check your sound settings.")
 
     def _next_seq(self) -> int:
         s = self._seq; self._seq += 1; return s
