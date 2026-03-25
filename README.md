@@ -172,12 +172,64 @@ The `_confident` flag tells the voice model whether to **auto-confirm** the top 
 
 ---
 
-## Indexes
+## Index Schema
 
-| Index | Key Fields | Custom Analyzers |
-|-------|------------|-----------------|
-| `user-slot-mapping-index` | UserID, FirstName, LastName, FullName, ASN1–4 | `user_name_analyzer`, Double Metaphone, Soundex, Beider-Morse phonetic fields |
-| `group-slot-mapping-index` | GroupID, GroupName, AlternateName1–3 | `hospital_group_analyzer` (char mapping, shingle, edge n-gram), normalised name fields |
+The application expects two Azure AI Search indexes with specific field names and custom analyzers. If your schema differs, update the field references in `search_client.py`.
+
+### `user-slot-mapping-index`
+
+| Field | Type | Searchable | Analyzer | Used By |
+|-------|------|-----------|----------|---------|
+| `id` | `Edm.String` (key) | — | — | Document key for RRF merge |
+| `FirstName` | `Edm.String` | Yes | `user_name_analyzer` | exact, fuzzy, targeted strategies |
+| `LastName` | `Edm.String` | Yes | `user_name_analyzer` | exact, fuzzy, targeted strategies |
+| `FullName` | `Edm.String` | Yes | `user_name_analyzer` | exact, fuzzy strategies |
+| `FirstName_phonetic` | `Edm.String` | Yes | Double Metaphone | phonetic-dm, targeted-phonetic |
+| `LastName_phonetic` | `Edm.String` | Yes | Double Metaphone | phonetic-dm, targeted-phonetic |
+| `FullName_phonetic` | `Edm.String` | Yes | Double Metaphone | phonetic-dm |
+| `FirstName_phonetic_soundex` | `Edm.String` | Yes | Soundex | phonetic-soundex |
+| `LastName_phonetic_soundex` | `Edm.String` | Yes | Soundex | phonetic-soundex |
+| `FirstName_phonetic_bm` | `Edm.String` | Yes | Beider-Morse | phonetic-bm |
+| `LastName_phonetic_bm` | `Edm.String` | Yes | Beider-Morse | phonetic-bm |
+
+### `group-slot-mapping-index`
+
+| Field | Type | Searchable | Analyzer | Used By |
+|-------|------|-----------|----------|---------|
+| `GroupID` | `Edm.String` (key) | — | — | Document key for RRF merge |
+| `GroupName` | `Edm.String` | Yes | `hospital_group_analyzer` | exact, fuzzy strategies |
+| `AlternateName1` | `Edm.String` | Yes | `hospital_group_analyzer` | exact, fuzzy strategies |
+| `AlternateName2` | `Edm.String` | Yes | `hospital_group_analyzer` | exact, fuzzy strategies |
+| `AlternateName3` | `Edm.String` | Yes | `hospital_group_analyzer` | exact, fuzzy strategies |
+| `GroupName_normalized` | `Edm.String` | Yes | `keyword_lowercase` + char mappings | norm-fields strategy |
+| `AlternateName1_normalized` | `Edm.String` | Yes | `keyword_lowercase` + char mappings | norm-fields strategy |
+| `AlternateName2_normalized` | `Edm.String` | Yes | `keyword_lowercase` + char mappings | norm-fields strategy |
+| `AlternateName3_normalized` | `Edm.String` | Yes | `keyword_lowercase` + char mappings | norm-fields strategy |
+| `AllNormalizedNames` | `Edm.String` | Yes | `keyword_lowercase` + char mappings | norm-fields strategy |
+| `GroupName_edge` | `Edm.String` | Yes | Edge n-gram | (reserved for prefix matching) |
+
+### Custom Analyzers
+
+| Analyzer | Algorithm | Applied To |
+|----------|-----------|-----------|
+| `user_name_analyzer` | Tokenizer with word delimiters, lowercase | Standard user name fields |
+| `hospital_group_analyzer` | Char mappings (`&`→`and`, `st`→`saint`), shingle, edge n-gram | Standard group name fields |
+| Double Metaphone | Phonetic token filter | `*_phonetic` fields |
+| Soundex | Phonetic token filter | `*_phonetic_soundex` fields |
+| Beider-Morse | Phonetic token filter | `*_phonetic_bm` fields |
+| `keyword_lowercase` + char mappings | Number-word normalisation (`3`→`three`) | `*_normalized` fields |
+
+### Where to Change If Your Schema Differs
+
+All field name references are in **`search_client.py`**, in two methods:
+
+| Location | What to change |
+|----------|---------------|
+| `search_user()` (~line 108) | `select`, `key_field`, `std_fields`, `phonetic_fields`, `soundex_fields`, `bm_fields` |
+| `search_group()` (~line 92) | `select`, `key_field`, `std_fields`, `norm_fields`, `edge_fields` |
+| `_build_user_strategies()` (~line 207) | Field-targeted AND logic assumes `FirstName` + `LastName` split — update if your name fields differ |
+| `_build_group_strategies()` (~line 132) | Number normalisation and norm-field queries — update field names to match your index |
+| `config.py` / `.env` | Index names (`AZURE_SEARCH_GROUP_INDEX`, `AZURE_SEARCH_USER_INDEX`) |
 
 ---
 
