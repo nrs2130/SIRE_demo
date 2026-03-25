@@ -185,22 +185,36 @@ The `_confident` flag tells the voice model whether to **auto-confirm** the top 
 
 ### Prerequisites
 
-- Python 3.11+
-- Microphone + speakers (configure device indices in `.env`)
-- Microsoft Foundry resource with a **`gpt-realtime`** deployment
-- Azure AI Search with `group-slot-mapping-index` and `user-slot-mapping-index`
-- PortAudio (macOS only: `brew install portaudio`)
+| Requirement | Details |
+|-------------|---------|
+| **Python** | 3.11 or later |
+| **Azure AI Foundry** | A Foundry resource with a **`gpt-realtime`** model deployment |
+| **Azure AI Search** | A search service with `user-slot-mapping-index` and `group-slot-mapping-index` configured with phonetic + normalised analyzers (see [Indexes](#indexes)) |
+| **Azure CLI** | `az login` required for Entra ID authentication (recommended over API keys) |
+| **Microphone + Speakers** | Any system audio devices — the app auto-detects defaults, or you can specify device indices in `.env` |
+| **PortAudio** | macOS only: `brew install portaudio` (required by PyAudio) |
 
 ### Setup
 
 ```bash
-# 1. Install dependencies
+# 1. Clone the repository
+git clone https://github.com/nrs2130/SIRE_demo.git
+cd SIRE_demo
+
+# 2. Create a virtual environment (recommended)
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # macOS/Linux
+
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 2. Configure environment — edit .env with your endpoints and keys
-#    (see Environment Variables below)
+# 4. Configure environment
+copy .env.example .env        # Windows
+# cp .env.example .env        # macOS/Linux
+# Then edit .env with your Azure endpoints and keys
 
-# 3. Login to Azure (for Entra ID / token-based auth)
+# 5. Login to Azure (for Entra ID / token-based auth)
 az login
 ```
 
@@ -214,7 +228,7 @@ python main.py --use-token-credential --verbose # with DEBUG logging
 ### Streamlit UI
 
 ```bash
-streamlit run streamlit_app.py
+python -m streamlit run streamlit_app.py
 ```
 
 The Streamlit app provides:
@@ -229,25 +243,29 @@ The Streamlit app provides:
 
 ## Environment Variables
 
-Create a `.env` file in the project root:
+Copy the example file and fill in your values:
 
-```dotenv
-# Azure AI Foundry (VoiceLive)
-AZURE_VOICELIVE_ENDPOINT=https://<your-foundry>.services.ai.azure.com/
-AZURE_VOICELIVE_MODEL=gpt-realtime
-AZURE_VOICELIVE_USE_TOKEN=true
-# AZURE_VOICELIVE_API_KEY=...        # alternative to token auth
-
-# Azure AI Search
-AZURE_SEARCH_ENDPOINT=https://<your-search>.search.windows.net
-AZURE_SEARCH_API_KEY=<key>
-AZURE_SEARCH_GROUP_INDEX=group-slot-mapping-index
-AZURE_SEARCH_USER_INDEX=user-slot-mapping-index
-
-# Audio devices (run `python -c "import pyaudio; p=pyaudio.PyAudio(); [print(i,p.get_device_info_by_index(i)['name']) for i in range(p.get_device_count())]"` to list)
-AUDIO_INPUT_DEVICE_INDEX=2
-AUDIO_OUTPUT_DEVICE_INDEX=4
+```bash
+copy .env.example .env        # Windows
+# cp .env.example .env        # macOS/Linux
 ```
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AZURE_VOICELIVE_ENDPOINT` | **Yes** | — | Azure AI Foundry resource endpoint |
+| `AZURE_VOICELIVE_API_KEY` | No | — | API key (leave blank for Entra ID auth) |
+| `AZURE_VOICELIVE_USE_TOKEN` | No | `false` | Set to `true` for Entra ID / `AzureCliCredential` |
+| `AZURE_VOICELIVE_MODEL` | No | `gpt-realtime` | Realtime model deployment name |
+| `AZURE_VOICELIVE_VOICE` | No | `en-US-Ava:DragonHDLatestNeural` | Azure Neural Voice for TTS |
+| `AZURE_SEARCH_ENDPOINT` | **Yes** | — | Azure AI Search service endpoint |
+| `AZURE_SEARCH_API_KEY` | **Yes** | — | Search service admin or query API key |
+| `AZURE_SEARCH_GROUP_INDEX` | No | `group-slot-mapping-index` | Group index name |
+| `AZURE_SEARCH_USER_INDEX` | No | `user-slot-mapping-index` | User index name |
+| `AZURE_SEARCH_API_VERSION` | No | `2024-07-01` | Search REST API version |
+| `AUDIO_INPUT_DEVICE_INDEX` | No | OS default | Microphone device index (leave blank for auto-detect) |
+| `AUDIO_OUTPUT_DEVICE_INDEX` | No | OS default | Speaker device index (leave blank for auto-detect) |
+
+See [.env.example](.env.example) for the full template with comments.
 
 ---
 
@@ -262,7 +280,9 @@ AUDIO_OUTPUT_DEVICE_INDEX=4
 | `export_indexes.py` | Export top records from each AI Search index to `SIRE_AI_Search_Data.xlsx` |
 | `test_enhanced_search.py` | Test harness for multi-strategy search with sample queries |
 | `setup_mcp_ai_search.ps1` | PowerShell script to configure the MCP AI Search connector |
-| `.env` | Environment variables (not committed) |
+| `mcp_server/` | MCP (Model Context Protocol) server — exposes search tools to MCP clients (VS Code Copilot, Claude Desktop, etc.) |
+| `.env.example` | Environment variable template — copy to `.env` and fill in values |
+| `.env` | Your environment variables (gitignored — never committed) |
 | `requirements.txt` | Python dependencies |
 
 ---
